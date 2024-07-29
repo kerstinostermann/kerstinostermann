@@ -1,0 +1,445 @@
+# -*- coding: utf-8 -*-
+"""
+Geodata in labor market research: trends, potentials and perspectives
+Find the article here: https://link.springer.com/article/10.1186/s12651-022-00310-x
+
+Code author: Kerstin Ostermann
+Created on Tue Aug 17 08:51:16 2021
+
+Plotting Maps
+
+Tasks: 
+- set paths
+- import relevant packages
+- set paramaters like colors and variables   
+- load data
+- determine breaks for legends
+- construct grid cell polygons
+- plot maps (for two different data sets: home and work)
+"""
+############################################################################################
+# Set up 
+####################################################################################################
+
+#set working directory
+path = "
+
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+import functools as ft
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+import seaborn as sns 
+from shapely.geometry import Point, Polygon, box
+from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
+import matplotlib.font_manager as fm
+    
+####################################################################################################
+# Parameters: colors and variables
+####################################################################################################
+
+# projection
+proj_utm32 = {'init' : 'epsg:32632'}      
+
+# background colors
+col_forest = "#b9dfb9"
+col_water  = "#add1eb"
+col_building = "#d2d2c6"
+col_street   = "darkgray"
+col_rail     = "lightgray"
+
+# color range  and font size for grids
+col_map = sns.cubehelix_palette(as_cmap=True, start=2.8, rot=.1)
+fontprops = fm.FontProperties(size=30, family='monospace')
+    
+# selected features
+features = ["n", "daily_wage_med", "daily_wage_gini", "sh_regemp","sh_not_emp",
+             "sh_educ_low", "sh_educ_med", "sh_educ_high"]
+
+# selected years
+years = [2000, 2010, 2017]
+
+
+####################################################################################################
+# Import and prepare the data
+####################################################################################################
+
+# grid data
+grid_home = pd.read_csv(path +"/data/map_data_home.csv")
+grid_work = pd.read_csv(path +"/data/map_data_work.csv")
+
+# import shape files (water, forests)
+water =  gpd.read_file(path +"/data/shapes/dlm250-aaa_ebenen/gew01_f.shp")
+forest =  gpd.read_file(path +"/data/shapes/dlm250-aaa_ebenen/veg02_f.shp")
+building =  gpd.read_file(path +"/data/shapes/dlm250-aaa_ebenen/sie01_f.shp")
+rail =  gpd.read_file(path +"/data/shapes/dlm250-aaa_ebenen/ver03_l.shp")
+street =  gpd.read_file(path +"/data/shapes/dlm250-aaa_ebenen/ver01_l.shp")
+muni =  gpd.read_file(path +"/data/shapes/VG250_GEM.shp")
+
+ 
+# extract ags form municipalities
+ags_muni = muni["AGS"]
+
+####################################################################################################
+# Determine fixed breaks for each feature
+####################################################################################################
+
+# distributions of features
+grid_home.describe()
+
+b = pd.DataFrame()
+breaks = pd.DataFrame()
+
+for feature in features:
+    # get 10% and 90% quantiles
+    b[feature]= pd.Series(np.quantile(grid_home[feature], [0.1, 0.9]))
+      
+    # round values and add breaks between min and max
+    if (max(b[feature]) > 1000):
+        # round "medium" values to nearest 100
+        b[feature] = round(b[feature]/100, 0) * 100
+        breaks[feature]  = pd.Series(np.arange(min(b[feature]), max(b[feature]+500), 500))
+        breaks[feature]  = [int(x) for x in breaks[feature]]
+
+        
+    elif (max(b[feature]) > 1):
+        b[feature] = round(b[feature]/10, 0) * 10
+        breaks[feature] = pd.Series(np.arange(min(b[feature]), max(b[feature]+10), 10))
+        
+    else:
+        # round small values to nearest 0.05
+        b[feature] = (round(b[feature]/0.05, 0) * 0.05 )*100
+        breaks[feature] = pd.Series(np.arange(min(b[feature]), max(b[feature]+5), 5)/100)
+        
+        b[feature] = b[feature]/100
+       
+    # inspect breaks
+    print(feature, breaks[feature])
+    
+# manually adopt some breaks
+breaks["n"][0] = 100
+breaks["daily_wage_gini"] = pd.Series(np.arange(min(breaks["daily_wage_gini"]*100), 
+                                                    max(breaks["daily_wage_gini"]*100 +2),2)/100)
+
+breaks["sh_regemp"] = pd.Series(np.arange(65, 95, 5)/100)
+breaks["sh_not_emp"] = pd.Series(np.arange(0, 15, 2)/100)
+breaks["daily_wage_med"] = pd.Series(np.arange(50, 110, 10))
+breaks["daily_wage_med"]  = [int(x) for x in breaks["daily_wage_med"]]
+
+# ... also for the n workplace
+grid_work["n"].describe()
+np.quantile(grid_work["n"], [0.1, 0.25, 0.5, 0.75, 0.9])
+breaks_n_work = pd.Series([100,500, 1000, 1500,2000,2500,3000]) 
+breaks_n_work  = [int(x) for x in breaks_n_work]
+
+####################################################################################################
+# Generate gridcell Polygons
+####################################################################################################
+
+# get distinct AGS and municipality names
+muni_names = grid_home[["ags", "muni_name"]]
+muni_names.drop_duplicates(inplace=True)
+
+# adjust the AGS of Göttingen, for some reason other AGS in muni data set
+#Göttingen
+muni_names["ags"] = [3152012 if x ==3159016 else x for x in muni_names["ags"]]
+muni["ags"] = [int(x) for x in muni["AGS"]]
+
+# for each city ...
+for a in muni_names["ags"]:
+    #a =  muni_names["ags"][0]              #test
+        
+    #get city coordinates
+    muni1 = muni.loc[muni["ags"]==a]
+    muni1.reset_index(inplace=True)
+    
+    #-----some special cases
+    #Hamburg (drop island)
+    if a == 2000000:
+        muni1.geometry[0] = muni1.geometry[0][0]
+        
+    #Bremen (drop Bremerhafen)
+    if a == 4011000:
+        muni1.geometry[1] = muni1.geometry[1][0]
+        muni1 = muni1.tail(1)
+    
+    #Göttingen
+    if a == 3152012:
+     grid_home["ags"] = [3152012 if x ==3159016 else x for x in  grid_home["ags"]]
+     grid_work["ags"] = [3152012 if x ==3159016 else x for x in  grid_work["ags"]]
+     
+        
+    xmin, ymin, xmax, ymax = muni1.total_bounds
+    city_coords = box(xmin, ymin, xmax, ymax).buffer(0)
+    
+     # filter map background data
+    water.geometry = water.geometry.to_crs(muni.geometry.crs)
+    water.crs == muni.crs
+    water_city = gpd.clip(water, city_coords)
+    
+    forest.geometry = forest.geometry.to_crs(muni.geometry.crs)
+    forest["geometry"] = forest.buffer(0)
+    forest_city = gpd.clip(forest, city_coords)
+    
+    rail.geometry = rail.geometry.to_crs(muni.geometry.crs)
+    rail_city = gpd.clip(rail, city_coords)
+    
+    street.geometry = street.geometry.to_crs(muni.geometry.crs)
+    street_city = gpd.clip(street, city_coords)
+    
+    building.geometry = building.geometry.to_crs(muni.geometry.crs)
+    building["geometry"] = building.buffer(0)
+    building_city = gpd.clip(building, city_coords)
+    
+    #in each year
+    for yr in years:
+        
+        #define restictions
+        city_crit1 = grid_home["ags"] == a
+        city_crit2 = grid_home["year"] == yr
+        
+        #restrict
+        allcrit = ft.reduce(lambda a, b: a & b,  [city_crit1, city_crit2])
+        grid_city = grid_home.loc[allcrit]
+        
+        
+        #----------------------------------------------------transform to GeoDataFrame
+        #min
+        grid_city["x_min"] = [x*1000 for x in grid_city["y"]]
+        grid_city["y_min"] = [x*1000 for x in grid_city["x"]]
+        #max
+        grid_city["x_max"] = [(x+1)*1000 for x in grid_city["y"]]                    
+        grid_city["y_max"] = [(x+1)*1000 for x in grid_city["x"]]
+        
+        p1,p2, p3,p4 = [], [], [], []
+        #store all min-max-coordinates in one DataFrame
+        for index, row in grid_city.iterrows():
+            #max max
+            point =  Point(row.x_max,row.y_max)
+            p1.append(point)
+        
+            #max min        
+            point =  Point(row.x_max,row.y_min)
+            p2.append(point)
+         
+            #min min 
+            point =  Point(row.x_min,row.y_min)
+            p3.append(point)
+        
+            #min max  
+            point =  Point(row.x_min,row.y_max)
+            p4.append(point) 
+            
+        # df
+        df_points = pd.DataFrame(list(zip(p1,p2,p3,p4)), 
+                                 columns = ["p1","p2","p3","p4"]) 
+            
+        #delete lists and scalars
+        del p1, p2, p3, p4
+        
+        #--------------------------------------------------------------------- POLYGON
+            
+        #generate polygon out of separate points
+        geoms =[]
+        geom = []
+        for index, row in df_points.iterrows():
+            geom = Polygon([(row.p1.x, row.p1.y),
+                            (row.p2.x, row.p2.y), 
+                            (row.p3.x, row.p3.y), 
+                            (row.p4.x, row.p4.y)])
+            geoms.append(geom)
+              
+        #clean up
+        del df_points
+        
+        # geodataframe 
+        grids = gpd.GeoDataFrame(list(range(len(geoms))), 
+                                   crs = proj_utm32, 
+                                   geometry = geoms) 
+        gridded_city = grids.join(grid_city.reset_index())
+        
+        #harmonize crs and join
+        gridded_city.geometry = gridded_city.geometry.to_crs(forest_city.geometry.crs)
+        gridded_city = gpd.clip(gridded_city, city_coords)
+        gridded_city.drop_duplicates(subset="geo_grid_cell", inplace=True)
+                
+        del geom
+           
+        ####################################################################################################
+        # Plot maps
+        ####################################################################################################
+              
+        #for each feature
+        for feature in features: 
+            #censor
+            gridded_city[feature] = [
+                    #replace lower bound
+                    b[feature][0] if x< b[feature][0]
+                    #replace upper bound
+                    else b[feature][1] if x>b[feature][1]
+                    
+                    #and round to 2 digits
+                    else int(x*100)/100 for x in gridded_city[feature]]
+            
+            #FIGURE
+            #set legend
+            legend_elements = [
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][0], markerfacecolor=col_map(0.05), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][1],markerfacecolor=col_map(0.2), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][2],markerfacecolor=col_map(0.4), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][3],markerfacecolor=col_map(0.6), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][4],markerfacecolor=col_map(0.8), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][5],markerfacecolor=col_map(0.9), markersize=30)]
+              
+            fig, ax = plt.subplots(figsize = (15,15)) 
+            #background
+            forest_city.plot(ax = ax, color=col_forest)  
+            water_city.plot(ax=ax, color=col_water)
+            building_city.plot(ax=ax, color=col_building)
+            street_city.plot(ax=ax, color=col_street)
+            rail_city.plot(ax=ax, color=col_rail, linestyle='--')
+                
+            #grid feature
+            gridded_city.plot(ax=ax, column=gridded_city[feature], alpha=0.9, cmap=col_map)
+            scalebar = AnchoredSizeBar(ax.transData,
+                                       1000, '1km', 'lower right', 
+                                       color='black',
+                                       frameon=False,
+                                       size_vertical=1,
+                                       fontproperties=fontprops)
+            ax.add_artist(scalebar)
+            ax.legend(handles=legend_elements, loc='upper right',
+                      fontsize=30, frameon=True)
+            ax.set_axis_off()
+            fig.tight_layout()
+            plt.show()
+            
+            fig.savefig(path +"/graphs/{0}_{1}_{2}.pdf".format(a, feature,yr))
+            
+        ####################################################################################################
+        # Work place data
+        ####################################################################################################
+        # (I use separate dataframes to avoid NAs in grid cells that are empty in one of the two datasets)
+    
+        feature = "n"
+        
+        #define restictions
+        city_crit1 = grid_work["ags"] == a
+        city_crit2 = grid_work["year"] == yr
+        
+        #restrict
+        allcrit = ft.reduce(lambda a, b: a & b,  [city_crit1, city_crit2])
+        
+        #restrict
+        grid_city = grid_work.loc[allcrit]
+        
+        #--------------------------------------------transform to GeoDataFrame
+        #min
+        grid_city["x_min"] = [x*1000 for x in grid_city["y"]]
+        grid_city["y_min"] = [x*1000 for x in grid_city["x"]]
+        #max
+        grid_city["x_max"] = [(x+1)*1000 for x in grid_city["y"]]                    
+        grid_city["y_max"] = [(x+1)*1000 for x in grid_city["x"]]
+        
+        p1,p2, p3,p4 = [], [], [], []
+        #store all min-max-coordinates in one DataFrame
+        
+        for index, row in grid_city.iterrows():
+            #max max
+            point =  Point(row.x_max,row.y_max)
+            p1.append(point)
+        
+            #max min        
+            point =  Point(row.x_max,row.y_min)
+            p2.append(point)
+         
+            #min min 
+            point =  Point(row.x_min,row.y_min)
+            p3.append(point)
+        
+            #min max  
+            point =  Point(row.x_min,row.y_max)
+            p4.append(point) 
+            
+        # df
+        df_points = pd.DataFrame(list(zip(p1,p2,p3,p4)), 
+                                 columns = ["p1","p2","p3","p4"]) 
+            
+        #delete lists and scalars
+        del p1, p2, p3, p4
+        
+        #--------------------------------------------------------------------- POLYGON
+            
+        #generate polygon out of separate points
+        geoms =[]
+        geom = []
+        for index, row in df_points.iterrows():
+            geom = Polygon([(row.p1.x, row.p1.y),
+                            (row.p2.x, row.p2.y), 
+                            (row.p3.x, row.p3.y), 
+                            (row.p4.x, row.p4.y)])
+            geoms.append(geom)
+              
+        #clean up
+        del df_points
+
+        # geodataframe    
+        grids = gpd.GeoDataFrame(list(range(len(geoms))), 
+                                   crs = proj_utm32, 
+                                   geometry = geoms) 
+        gridded_city = grids.join(grid_city.reset_index())
+        
+        #harmonize crs and join
+        gridded_city.geometry = gridded_city.geometry.to_crs(forest_city.geometry.crs)
+        gridded_city = gpd.clip(gridded_city, city_coords)
+        gridded_city.drop_duplicates(subset="geo_grid_cell", inplace=True)
+        
+        del geom
+        
+        ####################################################################################################
+        # Plot maps
+        ####################################################################################################
+        gridded_city[feature] = [
+                    #replace lower bound
+                    b[feature][0] if x< b[feature][0]
+                    #replace upper bound
+                    else b[feature][1] if x>b[feature][1]
+                    
+                    #and round to 2 digits
+                    else int(x*100)/100 for x in gridded_city[feature]]
+            
+        #FIGURE 
+        #set legend
+        legend_elements = [
+                Line2D([0], [0], marker='s', color='w', label = breaks[feature][0], markerfacecolor=col_map(0.05), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][1],markerfacecolor=col_map(0.2), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][2],markerfacecolor=col_map(0.4), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][3],markerfacecolor=col_map(0.6), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][4],markerfacecolor=col_map(0.8), markersize=30),
+                    Line2D([0], [0], marker='s', color='w', label = breaks[feature][5],markerfacecolor=col_map(0.9), markersize=30)]
+              
+        fig, ax = plt.subplots(figsize = (15,15)) 
+        #background
+        forest_city.plot(ax = ax, color=col_forest)  
+        water_city.plot(ax=ax, color=col_water)
+        building_city.plot(ax=ax, color=col_building)
+        street_city.plot(ax=ax, color=col_street)
+        rail_city.plot(ax=ax, color=col_rail, linestyle='--')
+            
+        #grid feature
+        gridded_city.plot(ax=ax, column=gridded_city[feature], alpha=0.8, cmap=col_map)
+        scalebar = AnchoredSizeBar(ax.transData,
+                                   1000, '1km', 'lower right', 
+                                   color='black',
+                                   frameon=False,
+                                   size_vertical=1,
+                                   fontproperties=fontprops)
+        ax.add_artist(scalebar)
+        ax.legend(handles=legend_elements, loc='upper right',
+                  fontsize=30, frameon=True, framealpha=0.5)
+        ax.set_axis_off()
+        fig.tight_layout()
+        plt.show()
+            
+        fig.savefig(path +"/graphs/{0}_{1}_work_{2}.pdf".format(a, feature,yr))
