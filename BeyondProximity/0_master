@@ -1,0 +1,219 @@
+# -*- coding: utf-8 -*-
+"""
+Project Beyond Proximity
+@author: Kerstin Ostermann
+
+Master file
+Created on Tue Aug 24 10:23:10 2021
+
+Tasks
+- set file paths
+- import relevant packages
+- implement and refine HDBSCAN algorithm
+- load point data and shapes
+- for each year and city: 
+    - 1_prep_ibasedata: prepare data
+    - 2_isocial_group: find groups of similar individuals and assign cluster labels to them
+    - for varying hyperparameter values of min_cluster_size: 3_ispatial_clustering: find neighborhoods
+    - store parametrics in separate dictionary/later DataFrame params_df
+- save results
+
+"""
+
+#set paths here
+orig = ''
+prog = ''
+data = ''
+out = ''
+
+#--------------------------relevant packages-----------------------------------
+#general
+import os
+import pandas as pd
+import numpy as np
+import math
+import functools as ft
+from datetime import datetime
+
+#plotting
+import matplotlib.font_manager as fm
+import matplotlib
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+#geo 
+# import descartes
+import geopandas as gpd
+import shapely
+from shapely.geometry import Point, Polygon, box, MultiLineString
+import fiona
+
+#cluster
+from sklearn.cluster import KMeans
+import hdbscan
+from sklearn.preprocessing import StandardScaler, normalize
+from autoelbow_rupakbob import autoelbow
+
+
+#Interpolation
+import alphashape
+
+#define color map
+col_map = sns.cubehelix_palette(as_cmap=True, dark=0, light=0.7, start=2.8, rot=.1)
+cmap = sns.color_palette("Spectral", as_cmap=True)
+plt.rcParams.update({'font.size': 22})
+
+#set globals
+years = list(range(2000,2018))
+
+#set projection
+proj_utm32 = 'epsg:32632'  
+proj_wgs84 = 'epsg:4326'
+
+#----------------------------------------------------HDBSCAN  cluster algorithm 
+def hdbscan_cluster(latitudes,longitudes,min_cluster_size, min_samples):
+    '''
+    Function to perform HDBSCAN clustering for given parameters.
+    https://hdbscan.readthedocs.io/en/latest/how_hdbscan_works.html
+    
+    Possible parameters and their meaning:
+    https://hdbscan.readthedocs.io/en/latest/parameter_selection.html
+    
+    min_cluster_size sets the minimum number of neighborhood members 
+    min_samples specifies how conservative the clustering is. 
+    Without min_samples specification: min_samples = min_clustering_size
+    
+    '''
+    # convert epsilon from km to radians
+    epsilon = 0.01   # merge everything below 10 meters to prevent vertical "strings" of neighborhoods
+    kms_per_radian = 6371.0088
+    epsilon /= kms_per_radian
+
+    # set up the algorithm
+    hdb = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size, 
+        min_samples = min_samples,
+        cluster_selection_epsilon = epsilon, 
+        metric='haversine')
+    
+    # fit the algorithm
+    hdb.fit(
+        np.radians(
+            [x for x in zip(latitudes,longitudes)]
+        )
+    )
+    
+    # return the cluster labels
+    #return pd.Series(hdb.labels_), pd.Series(hdb.probabilities_)
+    return pd.Series(hdb.labels_)
+
+#load shapes (here all, restiction to one city within city loop later)
+shp = gpd.read_file(orig + '/vg2500_krs.shp')
+
+#---------------------------------------------------------Individual level data
+#load data
+ieb_home = pd.read_stata(data +"/pointdata_IEB.dta")
+
+#initialize diagonostics DataFrame
+params_df = pd.DataFrame()
+min_samples = 1
+
+##################YEAR##################################
+#jahr = 2000
+for jahr in years: 
+    
+    ieb_home = pd.read_stata(data +"/pointdata_IEB.dta")
+    
+    #prepare
+    exec(open(prog + '/1_prep_ibasedata.py').read())
+    del ieb_home
+    
+    #extract list of unique city AGS
+    one_year["kreis"] = [int(x) for x in one_year["krs"]]
+    city_list = sorted(list(set(one_year["kreis"])))
+    
+    ################CITY########################   
+    cities_hulls = pd.DataFrame()
+    
+    for city in city_list: 
+        
+        print("This is city {0}000, year {1}".format(city, jahr))
+        
+        #initialize dict for diagnostics 
+        start = datetime.now()
+        params_dict = dict()
+        
+        #set starting sample
+        one_city = one_year.loc[one_year["kreis"]==city]
+        
+        #-----------------------------------------------------------prepare shp
+        #restrict shapefile to city area
+        shp["kreis"] = [int(x) for x in shp["RS"]]
+        shp_city = shp.loc[shp["kreis"]==city]
+
+        #draw square around city area for plotting
+        xmin, ymin, xmax, ymax = shp_city.total_bounds
+        city_coords = box(xmin, ymin, xmax, ymax).buffer(0)
+
+        one_city.geometry = one_city.geometry.to_crs(shp_city.geometry.crs)
+        one_city = gpd.clip(one_city, city_coords) 
+    
+        #---------------------------------------------social group construction 
+        
+        exec(open(prog + '/2_isocial_group.py').read())
+            
+            #----------------------------------------------------spatial clustering
+        for min_cluster_size_100 in [15, 25, 35, 45]:         
+                
+            #min_sample_size = 25 for a 100% sample
+            #min_cluster_size_100 = 25
+            min_cluster_size  = round(min_cluster_size_100 *(size/100))
+                
+            
+            params_dict["sample_size"] = size
+            params_dict["min_cluster_size_pop"] = min_cluster_size_100
+            params_dict["min_cluster_size_sample"] = min_cluster_size
+            params_dict["min_samples"] = min_samples
+            
+            exec(open(prog + '/3_ispatial_clustering.py').read())
+            
+            #-----------------------------------------------------store diagnostics
+            end = datetime.now()
+            delta = end-start
+            
+            #store values
+            params_dict["processing_time"] = str(delta)
+            params_dict["noise"] = noise_ratio
+            params_dict["Kmeans_clusters"] = n_clusters
+            
+            params_dict["n_neighborhoods"] = len(groups_hulls)
+            params_dict["n_highSES"] = groups_hulls["highSES"].sum()
+            params_dict["mean_n_residents"] = groups_hulls["n_units"].mean() * (1 + (1- size/100))
+            params_dict["median_n_residents"] = groups_hulls["n_units"].median() * (1 + (1- size/100))
+            params_dict["mean_area"] = groups_hulls["area"].mean()
+            params_dict["median_area"] = groups_hulls["area"].median()
+            params_dict["city"] = city
+            params_dict["year"] = jahr
+    
+            params_df = params_df.append(params_dict, ignore_index=True)
+        
+            #-----------------------------------------------------------------store 
+            groups_hulls["geometry"] = groups_hulls["geometry"].to_crs(proj_wgs84)   
+            groups_hulls["year"] = jahr
+            groups_hulls["city"] = city
+            groups_hulls["min_cluster_size_100"] = min_cluster_size_100
+            
+            cities_hulls = cities_hulls.append(groups_hulls)
+            del groups_hulls, noise_ratio, n_units, end, delta
+                
+    
+    cities_hulls.to_file(data + "/nhc_algo{0}_y{1}.geojson".format(first, jahr), driver='GeoJSON')   
+         
+############ END YEAR ################################
+
+#--------------------------------------------------------------------------save
+#hyperparameter 
+params_df.to_stata(data + "/parameter_dict.dta")
+
+
+
